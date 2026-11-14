@@ -18,7 +18,7 @@ var zeilen=[];
 if(!geleert&&ablage.indexOf(KOPF)===0){ablage.split('\n').slice(1).forEach(function(z){if(z.trim())zeilen.push(z);});}
 s.rows.forEach(function(r){if(zeilen.indexOf(r.z)<0)zeilen.push(r.z);});
 var rows=[].slice.call(document.querySelectorAll('tr.selectedRow'));
-if(!rows.length){hinweis(zeilen.length?('Keine Teile markiert. In der Sammlung: '+zeilen.length+' Teil(e).'):'Keine Ersatzteile markiert. Bitte zuerst die Teile in der Liste anklicken (rot).',zeilen.length>0);return;}
+if(!rows.length){hinweis(zeilen.length?('Keine Teile markiert. In der Sammlung: '+zeilen.length+' Teil(e).'):'Automatisch sammeln ist an: einfach die Ersatzteile in der Liste anklicken (rot) – jedes wird sofort gesammelt.',zeilen.length>0);return;}
 var neu=0;
 rows.forEach(function(r){var tab=r.closest('table'),h=tab?[].slice.call(tab.querySelectorAll('th')).map(function(x){return x.innerText.trim().toLowerCase();}):[];
 function ix(n,d){for(var k=0;k<h.length;k++){if(h[k].indexOf(n)>=0)return k;}return d;}
@@ -29,9 +29,22 @@ if(zeilen.indexOf(z)>=0)return;
 zeilen.push(z);neu++;});
 s.rows=zeilen.map(function(z){return{key:z,z:z};});speichere(s);
 var txt=KOPF+'\r\n'+zeilen.join('\r\n');
-var msg=(neu?neu+' Ersatzteil(e) hinzugefügt':'Diese Teile sind schon in der Sammlung')+' – zusammen '+zeilen.length+' in der Zwischenablage.\nWeitere Fenster/Baugruppen genauso sammeln, dann in Excel einmal auf „Ersatzteile einfügen“ klicken.';
+var msg=(neu?neu+' Ersatzteil(e) hinzugefügt':'Diese Teile sind schon in der Sammlung')+' – zusammen '+zeilen.length+' gesammelt.'+(window.__tdocAutoKlick?'':'\nAb jetzt wird jedes Teil, das du in diesem Fenster anklickst, automatisch gesammelt. Danach einfach zur Service-Mappe wechseln – die Teile werden dort automatisch eingefügt (in Excel wie bisher „Ersatzteile einfügen“).');
 function alt(){var t=document.createElement('textarea');t.value=txt;document.body.appendChild(t);t.select();try{document.execCommand('copy');hinweis(msg,true);}catch(e){prompt('Bitte mit Strg+C kopieren:',txt);}document.body.removeChild(t);}
 if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(txt).then(function(){hinweis(msg,true);},alt);}else{alt();}}
-try{if(navigator.clipboard&&navigator.clipboard.readText){navigator.clipboard.readText().then(weiter,function(){weiter('');});return;}}catch(e){}
-weiter('');
+function lesen(f){try{if(navigator.clipboard&&navigator.clipboard.readText){navigator.clipboard.readText().then(f,function(){f('');});return;}}catch(e){}f('');}
+/* Automatisch sammeln: nach dem ersten Klick auf das Lesezeichen wird jedes angeklickte (rote) Teil
+   in diesem Fenster sofort gesammelt – das Lesezeichen muss nicht noch einmal geklickt werden. */
+function auto(){
+if(window.__tdocAuto)return;window.__tdocAuto=true;
+var plan=null;
+function zaehle(){return document.querySelectorAll('tr.selectedRow').length;}
+var letzte=zaehle();
+function pruefen(){plan=null;var n=zaehle();if(n===letzte)return;var mehr=n>letzte;letzte=n;if(!mehr)return;
+lesen(function(t){window.__tdocAutoKlick=true;try{weiter(t);}finally{window.__tdocAutoKlick=false;}});}
+new MutationObserver(function(){if(!plan)plan=setTimeout(pruefen,250);}).observe(document.body,{subtree:true,attributes:true,attributeFilter:['class'],childList:true});
+var a=document.createElement('div');a.id='tdocAutoAnz';a.textContent='T-Doc → Service-Mappe: sammelt automatisch';
+a.style.cssText='position:fixed;left:16px;bottom:16px;z-index:2147483646;background:#1d7a35;color:#fff;font:12px Segoe UI,Arial,sans-serif;padding:6px 10px;border-radius:8px;opacity:.9;pointer-events:none';
+document.body.appendChild(a);}
+lesen(function(t){weiter(t);auto();});
 })();
