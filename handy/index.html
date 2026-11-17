@@ -81,9 +81,51 @@
 // Läuft ohne Google-Anmeldung: Die Seite schickt die Fotos direkt an den Server (Apps Script, doPost).
 // So stört es nicht, wenn im Handy-Browser mehrere Google-Konten angemeldet sind.
 var SERVER = "https://script.google.com/macros/s/AKfycbwj7l1K2RcGtPUu4wdRFjI7NLayzAtqjx0_XorzQmMNEqh-JyuEaOrUlOEN1BT9HVSC/exec";
-var p = new URLSearchParams(location.search);
+var p = new URLSearchParams(location.search), H = new URLSearchParams(location.hash.slice(1));
 var MODUS = p.get("ts") ? "ts" : p.get("vk") ? "vk" : "foto";
-var SIG = p.get("u") === "1";
+var SIG = p.get("u") === "1" || H.get("u") === "1";
+// ---- Ende-zu-Ende-Verschlüsselung ----
+// Der Schlüssel steht im QR-Code hinter „#k=“. Dieser Teil des Links wird vom Browser nie an einen Server
+// geschickt – weder an GitHub noch an Google. Fotos und Unterschrift werden hier im Handy verschlüsselt,
+// die Vorschaubilder kommen verschlüsselt vom Programm. Google speichert nur unlesbaren Inhalt.
+// Format: "SMV1" | 12 Byte IV | AES-GCM( 4 Byte Länge | JSON-Kopf | Daten )
+var KRYPTO = (function () {
+  var k = String(H.get("k") || "");
+  if (!k || !(window.crypto && crypto.subtle)) return null;
+  try {
+    var b = atob(k.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((k.length + 3) % 4)), roh = new Uint8Array(b.length);
+    for (var i = 0; i < b.length; i++) roh[i] = b.charCodeAt(i);
+    if (roh.length !== 32) return null;
+    return crypto.subtle.importKey("raw", roh, "AES-GCM", false, ["encrypt", "decrypt"]);
+  } catch (e) { return null; }
+})();
+function b64zuBytes(b64) { var b = atob(b64), u = new Uint8Array(b.length); for (var i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+function bytesZuB64(u) { var s = "", n = 0x8000; for (var i = 0; i < u.length; i += n) s += String.fromCharCode.apply(null, u.subarray(i, i + n)); return btoa(s); }
+// Daten (Base64) mit Kopf verschlüsseln; ohne Schlüssel unverändert (ältere Programme)
+function verschluesseln(kopf, b64) {
+  if (!KRYPTO) return Promise.resolve(null);
+  return KRYPTO.then(function (key) {
+    var j = new TextEncoder().encode(JSON.stringify(kopf)), d = b64zuBytes(b64), klar = new Uint8Array(4 + j.length + d.length);
+    new DataView(klar.buffer).setUint32(0, j.length); klar.set(j, 4); klar.set(d, 4 + j.length);
+    var iv = crypto.getRandomValues(new Uint8Array(12));
+    return crypto.subtle.encrypt({ name: "AES-GCM", iv: iv }, key, klar).then(function (ct) {
+      var c = new Uint8Array(ct), out = new Uint8Array(4 + 12 + c.length);
+      out.set([83, 77, 86, 49]); out.set(iv, 4); out.set(c, 16);
+      return bytesZuB64(out);
+    });
+  });
+}
+function entschluesseln(b64) {
+  var u = b64zuBytes(b64);
+  if (!KRYPTO || !(u[0] === 83 && u[1] === 77 && u[2] === 86 && u[3] === 49)) return Promise.resolve({ kopf: {}, b64: b64 });
+  return KRYPTO.then(function (key) {
+    return crypto.subtle.decrypt({ name: "AES-GCM", iv: u.subarray(4, 16) }, key, u.subarray(16));
+  }).then(function (pt) {
+    var k = new Uint8Array(pt), l = new DataView(pt).getUint32(0);
+    return { kopf: JSON.parse(new TextDecoder().decode(k.subarray(4, 4 + l))), b64: bytesZuB64(k.subarray(4 + l)) };
+  });
+}
+
 var T = String(p.get(MODUS) || "").replace(/[^a-f0-9]/g, "");
 function $(id) { return document.getElementById(id); }
 
@@ -184,8 +226,12 @@ function weiter() {
       var versuch = 0;
       var senden = function () {
         versuch++; j.z.lastChild.textContent = versuch > 1 ? "neuer Versuch (" + versuch + ") …" : "wird gesendet …";
-        anfrage({ event: "h_foto", name: j.f.name.replace(/\.[^.]+$/, "") + ".jpg", lm: zeit || j.f.lastModified,
-                  mime: "image/jpeg", b64: b64, exif: zeit ? 1 : 0 })
+        var meta = { name: j.f.name.replace(/\.[^.]+$/, "") + ".jpg", lm: zeit || j.f.lastModified, mime: "image/jpeg", exif: zeit ? 1 : 0 };
+        (j.enc ? Promise.resolve(j.enc) : verschluesseln(meta, b64)).then(function (enc) {
+          j.enc = enc;   // bei einem neuen Versuch nicht nochmal verschlüsseln
+          return anfrage(enc ? { event: "h_foto", name: "foto.jpg", lm: 0, mime: "image/jpeg", b64: enc, exif: 0 }
+                             : { event: "h_foto", name: meta.name, lm: meta.lm, mime: meta.mime, b64: b64, exif: meta.exif });
+        })
           .then(function () { n++; j.z.lastChild.textContent = "✓ gesendet"; j.z.lastChild.className = "ok"; aktiv--; weiter(); })
           .catch(function (err) {
             var t = String(err && err.message || err);
@@ -284,7 +330,10 @@ function vorschauLaden() {
   function bild() {
     if (laeuft >= 3 || !warteschlange.length) return;
     var s = warteschlange.shift(); laeuft++;
-    anfrage({ event: "h_vorschaubild", id: s.id }).then(function (b) { s.img.src = "data:image/jpeg;base64," + b; s.img.style.minHeight = ""; })
+    anfrage({ event: "h_vorschaubild", id: s.id }).then(entschluesseln).then(function (r) {
+      s.img.src = "data:image/jpeg;base64," + r.b64; s.img.style.minHeight = "";
+      if (r.kopf.titel) { s.cap.textContent = r.kopf.titel; s.img.alt = r.kopf.titel; }
+    })
       .catch(function () {}).then(function () { laeuft--; bild(); });
     bild();
   }
@@ -296,7 +345,7 @@ function vorschauLaden() {
         if (bekannt[s.id]) return; bekannt[s.id] = 1;
         var f = document.createElement("figure"), c = document.createElement("figcaption"), im = document.createElement("img");
         c.textContent = s.titel || ""; im.alt = s.titel || "Bericht"; im.style.minHeight = "120px"; im.style.background = "#eee";
-        f.appendChild(c); f.appendChild(im); $("vorSeiten").appendChild(f); s.img = im; warteschlange.push(s);
+        f.appendChild(c); f.appendChild(im); $("vorSeiten").appendChild(f); s.img = im; s.cap = c; warteschlange.push(s);
       });
       bild();
       gleich = l.length === letzte ? gleich + 1 : 0; letzte = l.length;
@@ -325,7 +374,11 @@ function vorschauLaden() {
     t.getContext("2d").drawImage(c, x0 - m, y0 - m, t.width, t.height, 0, 0, t.width, t.height);
     var b64 = t.toDataURL("image/png").split(",")[1];
     $("sigOk").disabled = true; st.className = ""; st.textContent = "Wird gesendet …";
-    anfrage({ event: "h_foto", name: "unterschrift.png", lm: Date.now(), mime: "image/png", b64: b64, exif: 0 })
+    var meta = { name: "unterschrift.png", lm: Date.now(), mime: "image/png", exif: 0 };
+    verschluesseln(meta, b64).then(function (enc) {
+      return anfrage(enc ? { event: "h_foto", name: "unterschrift.png", lm: 0, mime: "image/png", b64: enc, exif: 0 }
+                         : { event: "h_foto", name: meta.name, lm: meta.lm, mime: meta.mime, b64: b64, exif: 0 });
+    })
       .then(function () { st.className = "ok"; st.textContent = "✓ Danke! Die Unterschrift ist übertragen. Sie können die Seite schließen."; })
       .catch(function (e) { $("sigOk").disabled = false; st.className = "err"; st.textContent = "Fehler: " + (e.message || e); });
   };
